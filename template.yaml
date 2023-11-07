@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'  # Enable AWS SAM transformation
+Description: CloudFormation Stack for Logging and Analyzing User Searches on Offerwall Page
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Name for the S3 bucket to store user data
+Resources:
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      VersioningConfiguration:
+        Status: Enabled
+
+  SQSQueue:
+    Type: AWS::SQS::Queue
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      QueueName: UserDataQueue
+      MessageRetentionPeriod: 1209600 # 14 days
+
+  ServerlessRestApi:
+    Type: AWS::Serverless::Api
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      StageName: Prod
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub arn:aws:s3:::${BucketName}/*
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt SQSQueue.Arn
+
+  SearchLogFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./your-lambda-code
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      FunctionName: SearchLogFunction
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          SQSQueueURL: !GetAtt SQSQueue.QueueUrl
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /search
+            Method: post
+            RestApiId: !Ref ServerlessRestApi
+
+  UserDataProcessingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./your-lambda-code
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      FunctionName: UserDataProcessingFunction
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          Bucket: !Ref Bucket
+      Events:
+        SQSQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SQSQueue.Arn
+
+  QuickSightDataSource:
+    Type: AWS::QuickSight::DataSource
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DataSourceId: QuickSightDataSourceId
+      Name: UserData
+      DataSourceParameters:
+        S3Parameters:
+          ManifestFileLocation:
+            Bucket: !Ref Bucket
+            Key: manifest.json
+      Permissions:
+        - Principal: "*" # Update the permissions as needed
+          Actions:
+            - "quicksight:DescribeDataSource"
+            - "quicksight:DescribeDataSourcePermissions"
+            - "quicksight:PassDataSource"
+            - "quicksight:UpdateDataSource"
+            - "quicksight:DeleteDataSource"
+            - "quicksight:UpdateDataSourcePermissions"
+
+  QuickSightDataSet:
+    Type: AWS::QuickSight::DataSet
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DataSetId: QuickSightDataSetId
+      Name: UserData
+      PhysicalTableMap:
+        UserData:
+          S3Source:
+            DataSourceArn: !GetAtt QuickSightDataSource.Arn
+            InputColumns:
+              - Name: "user_id"
+                Type: "STRING"
+              - Name: "search_term"
+                Type: "STRING"
+              - Name: "search_timestamp"
+                Type: "DATETIME"
+
+            # Add more columns as needed
+
+      LogicalTableMap:
+        UserData:
+          Alias: UserData
+          Source:
+            PhysicalTableId: UserData
+      Permissions:
+        - Principal: "*" # Update the permissions as needed
+          Actions:
+            - "quicksight:DescribeDataSet"
+            - "quicksight:DescribeDataSetPermissions"
+            - "quicksight:PassDataSet"
+            - "quicksight:DescribeIngestion"
+            - "quicksight:ListIngestions"
+            - "quicksight:UpdateDataSet"
+            - "quicksight:DeleteDataSet"
+            - "quicksight:CreateIngestion"
+            - "quicksight:CancelIngestion"
+            - "quicksight:UpdateDataSetPermissions"
+
+Outputs:
+  SearchLogApiUrl:
+    Description: "API Gateway URL"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/search"
